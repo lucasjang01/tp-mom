@@ -39,3 +39,36 @@ Instalar los dependencias de la suite de pruebas:
 Instalar una versión de Golang superior a `1.24`.
 Instalar los dependencias de la suite de pruebas:
 `go mod download`
+
+---
+
+## Resolución (Python)
+
+- **Work Queue**: múltiples productores y consumidores comparten una cola nombrada. Cada mensaje es procesado por exactamente un consumidor. Es útil para distribuir trabajo entre workers.
+- **Direct Exchange**: los mensajes se enrutan por routing key. Cada consumidor se suscribe a una o más keys y recibe una copia propia de cada mensaje que le corresponde, habilitando patrones de broadcast.
+
+### Decisiones de diseño
+
+**Clase base `_RabbitMQBase`**
+
+Los dos patrones Work Queue y Direct Exchange comparten la lógica de conexión, el loop de consumo y el cierre de recursos. Para no repetir código, esta lógica se encapsuló en una clase base interna, de la que heredan las dos implementaciones.
+
+**Patrón Work Queue**
+
+Se declara una cola durable y se configura `prefetch_count=1` para garantizar distribución justa entre consumidores competidores: RabbitMQ no envía un segundo mensaje a un consumidor hasta que éste haga `ack` del primero. El envío usa el exchange default (`''`), que enruta directamente por nombre de cola.
+
+**Patrón Direct Exchange**
+
+Se declara un exchange de tipo `direct`. Cada instancia de consumidor crea su propia cola exclusiva con nombre generado por el servidor, que se elimina automaticamente al desconectarse. Luego bindea esa cola al exchange por cada routing key correspondiente. Esto garantiza que si dos consumidores se suscriben a la misma key, cada uno recibe su propia copia del mensaje (fan-out), a diferencia de una work queue donde se repartirian.
+
+**Adaptación del callback**
+
+La interfaz del middleware expone `(message, ack, nack)` pero pika internamente llama a los callbacks con `(ch, method, properties, body)`. El método `_wrap_callback` hace de traductor entre ambas firmas.
+
+**`stop_consuming` desde adentro del callback**
+
+Los tests llaman a `stop_consuming()` desde adentro del callback de consumo. Esto es seguro en pika porque `BlockingConnection` es single-threaded: `stop_consuming()` solo setea un flag interno que pika chequea después de que el callback retorna, saliendo del loop limpiamente.
+
+**Manejo de errores**
+
+Cada operacion mapea las excepciones de pika a las excepciones definidas en la interfaz: errores de conexión levantan `MessageMiddlewareDisconnectedError`, errores de mensajería levantan `MessageMiddlewareMessageError`, y errores al cerrar levantan `MessageMiddlewareCloseError`. El cierre de canal y conexion se realiza en bloques independientes para que un fallo en uno no impida cerrar el otro.
