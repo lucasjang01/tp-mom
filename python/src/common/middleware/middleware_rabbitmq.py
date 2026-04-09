@@ -10,7 +10,7 @@ from .middleware import (
 
 class _RabbitMQBase:
     def _connect(self, host):
-        params = pika.ConnectionParameters(host=host, port=5672)
+        params = pika.ConnectionParameters(host=host, port=5672, heartbeat=60)
         try:
             self._connection = pika.BlockingConnection(params)
             self._channel = self._connection.channel()
@@ -72,9 +72,11 @@ class MessageMiddlewareQueueRabbitMQ(_RabbitMQBase, MessageMiddlewareQueue):
         self._queue_name = queue_name
         self._connect(host)
         try:
+            self._channel.confirm_delivery()
             self._channel.queue_declare(queue=queue_name, durable=True)
             self._channel.basic_qos(prefetch_count=1)
         except pika.exceptions.AMQPError as e:
+            self.close()
             raise MessageMiddlewareDisconnectedError("Failed to declare queue") from e
 
     def send(self, message):
@@ -94,8 +96,13 @@ class MessageMiddlewareExchangeRabbitMQ(_RabbitMQBase, MessageMiddlewareExchange
         self._exchange_name = exchange_name
         self._routing_keys = routing_keys
         self._connect(host)
-        self._setup_exchange()
-        self._setup_queue_and_bindings()
+        try:
+            self._channel.confirm_delivery()
+            self._setup_exchange()
+            self._setup_queue_and_bindings()
+        except Exception:
+            self.close()
+            raise
 
     def _setup_exchange(self):
         try:
